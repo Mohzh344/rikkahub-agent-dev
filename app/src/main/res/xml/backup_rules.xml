@@ -1,11 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-   Legacy auto-backup rules (API < 31).
-   include-only mode: only files/upload/ is backed up.
-   Everything else (databases, sharedpref, datastore, known_hosts) is excluded by default.
--->
 <full-backup-content>
   <include domain="file" path="upload/" />
-  <exclude domain="database" path="." />
-  <exclude domain="sharedpref" path="." />
 </full-backup-content>
