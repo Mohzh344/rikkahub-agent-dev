@@ -48,16 +48,107 @@ val appModule = module {
     single { BiometricResultBuffer() }
 
     single { ScheduledJobRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().scheduledJobDao()) }
+    single { me.rerere.rikkahub.data.repository.ScheduledJobRunRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().scheduledJobRunDao()) }
+    single { me.rerere.rikkahub.service.DirectModeActionRunner(get()) }
     single { CronJobScheduler(get(), get()) }
     single { SshHostRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().sshHostDao()) }
     single { TelegramChatRepository(get<me.rerere.rikkahub.data.db.AppDatabase>().telegramChatDao()) }
     single { TelegramBotPreferences(get()) }
+    single { me.rerere.rikkahub.browser.BrowserPreferences(get()) }
+    // Pass 3: Telegram-bound screenshot streamer for headless browser mode. Bound to the
+    // [BrowserScreenshotStreamer] interface so [BrowserController.streamScreenshotIfHeadless]
+    // can resolve it lazily via Koin without taking a constructor dep — avoids a cycle
+    // through TelegramBotClient → TelegramBotPreferences → ... → LocalTools → controller.
+    single<me.rerere.rikkahub.browser.BrowserScreenshotStreamer> {
+        me.rerere.rikkahub.data.telegram.TelegramBrowserScreenshotStreamer(get(), get())
+    }
     single { me.rerere.rikkahub.data.preferences.ToolApprovalPreferences(get()) }
     single { TelegramBotClient { runCatching { kotlinx.coroutines.runBlocking { get<TelegramBotPreferences>().current().token } }.getOrDefault("") } }
     single { NotificationListenerPreferences(get()) }
 
+    // Phase 13: External Automation Intent API
+    single { me.rerere.rikkahub.automation.ExternalAutomationConfig(get()) }
     single {
-        LocalTools(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get())
+        me.rerere.rikkahub.automation.ExternalAutomationDispatcher(
+            context = get(),
+            config = get(),
+            chatService = get(),
+            conversationRepo = get(),
+            settingsStore = get(),
+            appScope = get(),
+        )
+    }
+
+    // Phase 14: Reliability bundle
+    single { me.rerere.rikkahub.reliability.GitHubReleaseChecker(get()) }
+    single { me.rerere.rikkahub.reliability.BugReportBuilder(get()) }
+
+    // Phase 11: Sub-agents
+    single { me.rerere.rikkahub.subagent.SubAgentRegistry() }
+    single {
+        me.rerere.rikkahub.subagent.SubAgentEngine(
+            registry = get(),
+            // chatService is resolved lazily inside SubAgentEngine to break the
+            // ChatService→LocalTools→SubAgentEngine→ChatService cycle. See SubAgentEngine kdoc.
+            conversationRepo = get(),
+            settingsStore = get(),
+            appScope = get(),
+        )
+    }
+
+    // Phase 16: Skill URL-import
+    single {
+        me.rerere.rikkahub.skills.SkillUrlImporter(
+            skillManager = get<me.rerere.rikkahub.data.files.SkillManager>(),
+        )
+    }
+
+    // Phase 19B: Skill isolation tester. Eager construction is safe here — ChatService
+    // doesn't reach back into SkillTestRunner anywhere, so no DI cycle.
+    single {
+        me.rerere.rikkahub.skills.SkillTestRunner(
+            chatService = get(),
+            skillManager = get(),
+            conversationRepo = get(),
+            settingsStore = get(),
+        )
+    }
+
+    // Phase 18: JS skills (run_js + secrets store)
+    single { me.rerere.rikkahub.skills.js.JsSkillRunner(get()) }
+    single { me.rerere.rikkahub.skills.js.SkillSecretsStore(get()) }
+
+    // Phase 12: Workflows
+    single {
+        me.rerere.rikkahub.workflow.repository.WorkflowRepository(
+            workflowDao = get<me.rerere.rikkahub.data.db.AppDatabase>().workflowDao(),
+            workflowRunDao = get<me.rerere.rikkahub.data.db.AppDatabase>().workflowRunDao(),
+        )
+    }
+    single { me.rerere.rikkahub.workflow.condition.ContextProvider(get()) }
+    single { me.rerere.rikkahub.workflow.execution.WorkflowActionRunner() }
+    single {
+        me.rerere.rikkahub.workflow.execution.WorkflowEngine(
+            repository = get(),
+            settingsStore = get(),
+            contextProvider = get(),
+            actionRunner = get(),
+        ).also { engine ->
+            // Bridge for the repo to notify the engine on delete so the engine's per-workflow
+            // lock map doesn't leak. Lazy because both singletons have to exist first.
+            get<me.rerere.rikkahub.workflow.repository.WorkflowRepository>().bindEngine(engine)
+        }
+    }
+    single {
+        me.rerere.rikkahub.workflow.trigger.TriggerRegistry(
+            context = get(),
+            appScope = get(),
+            workflowRepository = get(),
+        )
+    }
+
+    single {
+        LocalTools(get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get(), get())
     }
 
     single {
@@ -118,6 +209,21 @@ val appModule = module {
             conversationRepo = get(),
             settingsStore = get(),
             filesManager = get()
+        )
+    }
+
+    single {
+        me.rerere.rikkahub.ui.pages.setting.doctor.DoctorChecks(
+            context = get(),
+            settingsStore = get(),
+            telegramPrefs = get(),
+            workflowRepository = get(),
+            scheduledJobRepository = get(),
+            scheduledJobRunRepository = get(),
+            conversationRepository = get(),
+            database = get(),
+            // Pass 3: surface the browser write-tools-enabled INFO row + profile-dir AutoFix.
+            browserPreferences = get(),
         )
     }
 }

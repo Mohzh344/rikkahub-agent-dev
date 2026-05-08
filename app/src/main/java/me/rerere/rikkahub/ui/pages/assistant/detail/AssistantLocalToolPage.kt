@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.ui.pages.assistant.detail
 
 import android.Manifest
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -26,6 +27,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,11 +45,14 @@ import me.rerere.rikkahub.data.ai.tools.LocalToolOption
 import me.rerere.rikkahub.data.ai.tools.local.PermissionHelper
 import me.rerere.rikkahub.data.ai.tools.local.TermuxIntegration
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.telegram.TelegramBotPreferences
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.components.ui.CardGroup
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.theme.CustomColors
+import me.rerere.rikkahub.utils.writeClipboardText
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
 
 @Composable
@@ -97,6 +102,93 @@ private fun AssistantLocalToolContent(
             assistant.localTools - option
         }
         onUpdate(assistant.copy(localTools = newLocalTools))
+    }
+
+    // Setup-hint popups for toggles whose successful enable depends on user setup the
+    // toggle itself can't perform: Termux's allow-external-apps property, the Telegram
+    // bot token, and the cross-tool dependency hint for cron. Each is gated to fire at
+    // most once per visit to this screen, and only when the missing thing is actually
+    // missing (e.g. Termux dialog is suppressed if the integration was already verified
+    // recently; Telegram dialog is suppressed if a token is on file).
+    val ctx = LocalContext.current
+    val toaster = LocalToaster.current
+    val scope = rememberCoroutineScope()
+    val telegramBotPreferences = koinInject<TelegramBotPreferences>()
+
+    var showTermuxPostGrantDialog by remember { mutableStateOf(false) }
+    var showTelegramNoTokenDialog by remember { mutableStateOf(false) }
+    var showWorkflowsHintDialog by remember { mutableStateOf(false) }
+    var termuxDialogShownThisVisit by remember { mutableStateOf(false) }
+    var telegramDialogShownThisVisit by remember { mutableStateOf(false) }
+    var cronToastShownThisVisit by remember { mutableStateOf(false) }
+    var workflowsDialogShownThisVisit by remember { mutableStateOf(false) }
+
+    val cronHintText = stringResource(R.string.assistant_page_local_tools_cron_jobs_toast_hint)
+    val termuxCommand = stringResource(R.string.assistant_page_local_tools_termux_postgrant_command)
+    val termuxCopiedText = stringResource(R.string.assistant_page_local_tools_termux_postgrant_copied)
+
+    if (showTermuxPostGrantDialog) {
+        AlertDialog(
+            onDismissRequest = { showTermuxPostGrantDialog = false },
+            title = { Text(stringResource(R.string.assistant_page_local_tools_termux_postgrant_title)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(stringResource(R.string.assistant_page_local_tools_termux_postgrant_message))
+                    androidx.compose.material3.Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = MaterialTheme.shapes.small,
+                    ) {
+                        Text(
+                            text = termuxCommand,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            ),
+                            modifier = Modifier.padding(8.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    ctx.writeClipboardText(termuxCommand)
+                    toaster.show(termuxCopiedText)
+                    showTermuxPostGrantDialog = false
+                }) {
+                    Text(stringResource(R.string.assistant_page_local_tools_termux_postgrant_copy))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTermuxPostGrantDialog = false }) {
+                    Text(stringResource(R.string.assistant_page_local_tools_dialog_dismiss))
+                }
+            },
+        )
+    }
+
+    if (showTelegramNoTokenDialog) {
+        AlertDialog(
+            onDismissRequest = { showTelegramNoTokenDialog = false },
+            title = { Text(stringResource(R.string.assistant_page_local_tools_telegram_notoken_title)) },
+            text = { Text(stringResource(R.string.assistant_page_local_tools_telegram_notoken_message)) },
+            confirmButton = {
+                TextButton(onClick = { showTelegramNoTokenDialog = false }) {
+                    Text(stringResource(R.string.assistant_page_local_tools_dialog_dismiss))
+                }
+            },
+        )
+    }
+
+    if (showWorkflowsHintDialog) {
+        AlertDialog(
+            onDismissRequest = { showWorkflowsHintDialog = false },
+            title = { Text(stringResource(R.string.assistant_page_local_tools_workflows_hint_title)) },
+            text = { Text(stringResource(R.string.assistant_page_local_tools_workflows_hint_message)) },
+            confirmButton = {
+                TextButton(onClick = { showWorkflowsHintDialog = false }) {
+                    Text(stringResource(R.string.assistant_page_local_tools_dialog_dismiss))
+                }
+            },
+        )
     }
 
     Column(
@@ -617,7 +709,39 @@ private fun AssistantLocalToolContent(
                 trailingContent = {
                     PermissionedSwitch(
                         checked = assistant.localTools.contains(LocalToolOption.CronJobs),
-                        onCheckedChange = { toggleLocalTool(LocalToolOption.CronJobs, it) }
+                        onCheckedChange = { newValue ->
+                            toggleLocalTool(LocalToolOption.CronJobs, newValue)
+                            if (newValue && !cronToastShownThisVisit) {
+                                cronToastShownThisVisit = true
+                                toaster.show(cronHintText)
+                            }
+                        }
+                    )
+                }
+            )
+        }
+
+        Text(
+            text = stringResource(R.string.assistant_page_local_tools_section_files),
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(start = 16.dp, top = 8.dp)
+        )
+        CardGroup {
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_files_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_files_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.Files),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.Files, it) },
+                        // MANAGE_EXTERNAL_STORAGE is a special "appop" permission. Without it,
+                        // File.listFiles() on shared storage paths only returns subdirectories
+                        // and the app's own creations — every pre-existing file is hidden.
+                        requiresAllFilesAccess = true,
                     )
                 }
             )
@@ -639,7 +763,16 @@ private fun AssistantLocalToolContent(
                 trailingContent = {
                     PermissionedSwitch(
                         checked = assistant.localTools.contains(LocalToolOption.Ssh),
-                        onCheckedChange = { toggleLocalTool(LocalToolOption.Ssh, it) }
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.Ssh, it) },
+                        // Android 17 (API 37) blocks LAN socket access without
+                        // ACCESS_LOCAL_NETWORK. SSH is the canonical case — every
+                        // saved host lives on someone's WiFi/VPN. On older API
+                        // levels the permission doesn't exist; the request silently
+                        // no-ops since the manifest-declared permission isn't
+                        // dangerous-protection there.
+                        requiredRuntimePerms = if (Build.VERSION.SDK_INT >= 37) {
+                            listOf(android.Manifest.permission.ACCESS_LOCAL_NETWORK)
+                        } else emptyList(),
                     )
                 }
             )
@@ -653,7 +786,177 @@ private fun AssistantLocalToolContent(
                 trailingContent = {
                     PermissionedSwitch(
                         checked = assistant.localTools.contains(LocalToolOption.TelegramBot),
-                        onCheckedChange = { toggleLocalTool(LocalToolOption.TelegramBot, it) }
+                        onCheckedChange = { newValue ->
+                            toggleLocalTool(LocalToolOption.TelegramBot, newValue)
+                            if (newValue && !telegramDialogShownThisVisit) {
+                                scope.launch {
+                                    if (telegramBotPreferences.current().token.isBlank()) {
+                                        telegramDialogShownThisVisit = true
+                                        showTelegramNoTokenDialog = true
+                                    }
+                                }
+                            }
+                        }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_mcp_control_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_mcp_control_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.McpControl),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.McpControl, it) }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_external_automation_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_external_automation_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.ExternalAutomation),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.ExternalAutomation, it) }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_reliability_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_reliability_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.Reliability),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.Reliability, it) }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_sub_agents_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_sub_agents_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.SubAgents),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.SubAgents, it) }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_cost_guards_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_cost_guards_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.CostGuards),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.CostGuards, it) }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_workflows_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_workflows_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.Workflows),
+                        onCheckedChange = { newValue ->
+                            toggleLocalTool(LocalToolOption.Workflows, newValue)
+                            // Workflows depend on a mix of runtime grants the toggle itself
+                            // can't request (geofence needs background-location, notification
+                            // triggers need notification-listener, app-launch triggers need
+                            // accessibility, BT triggers need BLUETOOTH_CONNECT). Surface a
+                            // one-time hint at enable so the user knows what to grant when
+                            // they author a workflow whose trigger needs it.
+                            if (newValue && !workflowsDialogShownThisVisit) {
+                                workflowsDialogShownThisVisit = true
+                                showWorkflowsHintDialog = true
+                            }
+                        }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_skill_import_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_skill_import_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.SkillImport),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.SkillImport, it) }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_js_skills_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_js_skills_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.JsSkills),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.JsSkills, it) }
+                    )
+                }
+            )
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_system_intents_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_system_intents_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.SystemIntents),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.SystemIntents, it) }
+                    )
+                }
+            )
+        }
+
+        Text(
+            text = stringResource(R.string.assistant_page_local_tools_section_browser),
+            style = MaterialTheme.typography.titleSmall,
+            modifier = Modifier.padding(start = 16.dp, top = 8.dp)
+        )
+        CardGroup {
+            item(
+                headlineContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_browser_title))
+                },
+                supportingContent = {
+                    Text(stringResource(R.string.assistant_page_local_tools_browser_desc))
+                },
+                trailingContent = {
+                    PermissionedSwitch(
+                        checked = assistant.localTools.contains(LocalToolOption.Browser),
+                        onCheckedChange = { toggleLocalTool(LocalToolOption.Browser, it) },
                     )
                 }
             )
@@ -706,7 +1009,19 @@ private fun AssistantLocalToolContent(
                 trailingContent = {
                     PermissionedSwitch(
                         checked = assistant.localTools.contains(LocalToolOption.Termux),
-                        onCheckedChange = { toggleLocalTool(LocalToolOption.Termux, it) },
+                        onCheckedChange = { newValue ->
+                            toggleLocalTool(LocalToolOption.Termux, newValue)
+                            if (newValue && !termuxDialogShownThisVisit) {
+                                // Skip the dialog if a recent successful verify proves the
+                                // property file is already in place — nothing new to teach.
+                                val recentlyVerified = TermuxIntegration.lastVerifiedOkAtMs > 0 &&
+                                    (System.currentTimeMillis() - TermuxIntegration.lastVerifiedOkAtMs) < 24L * 60 * 60 * 1000
+                                if (!recentlyVerified) {
+                                    termuxDialogShownThisVisit = true
+                                    showTermuxPostGrantDialog = true
+                                }
+                            }
+                        },
                         // Termux's RUN_COMMAND service is gated behind a dangerous-level
                         // custom permission. Requesting it through the standard runtime flow
                         // pops the system dialog so termux_run_command works without an adb
@@ -728,6 +1043,7 @@ private fun PermissionedSwitch(
     requiresDndAccess: Boolean = false,
     requiresAccessibilityService: Boolean = false,
     requiresNotificationListener: Boolean = false,
+    requiresAllFilesAccess: Boolean = false,
 ) {
     val ctx = LocalContext.current
     val toaster = LocalToaster.current
@@ -776,6 +1092,7 @@ private fun PermissionedSwitch(
                         requiresDndAccess -> PermissionHelper.hasDndAccess(ctx)
                         requiresAccessibilityService -> PermissionHelper.hasAccessibilityService(ctx)
                         requiresNotificationListener -> PermissionHelper.hasNotificationListener(ctx)
+                        requiresAllFilesAccess -> PermissionHelper.hasAllFilesAccess(ctx)
                         else -> false
                     }
                     pendingSpecialResume = false
@@ -787,6 +1104,7 @@ private fun PermissionedSwitch(
                             requiresDndAccess -> "DND access"
                             requiresAccessibilityService -> "Accessibility service"
                             requiresNotificationListener -> "Notification access"
+                            requiresAllFilesAccess -> "All files access"
                             else -> ""
                         }
                         toaster.show(
@@ -837,6 +1155,14 @@ private fun PermissionedSwitch(
                 }
             }
 
+            requiresAllFilesAccess -> {
+                if (PermissionHelper.hasAllFilesAccess(ctx)) {
+                    onCheckedChange(true)
+                } else {
+                    showDialog = true
+                }
+            }
+
             requiredRuntimePerms.isNotEmpty() -> {
                 if (PermissionHelper.hasRuntime(ctx, requiredRuntimePerms)) {
                     onCheckedChange(true)
@@ -855,13 +1181,14 @@ private fun PermissionedSwitch(
     // raw List<String> for structural equality across recomps, so passing the list
     // directly invalidated this remember on every parent recomp.
     val permsKey = remember(requiredRuntimePerms) { requiredRuntimePerms.joinToString(",") }
-    val permissionMissing = remember(checked, resumeTrigger, permsKey, requiresWriteSettings, requiresDndAccess, requiresAccessibilityService, requiresNotificationListener) {
+    val permissionMissing = remember(checked, resumeTrigger, permsKey, requiresWriteSettings, requiresDndAccess, requiresAccessibilityService, requiresNotificationListener, requiresAllFilesAccess) {
         checked && when {
             requiredRuntimePerms.isNotEmpty() -> !PermissionHelper.hasRuntime(ctx, requiredRuntimePerms)
             requiresWriteSettings -> !PermissionHelper.hasWriteSettings(ctx)
             requiresDndAccess -> !PermissionHelper.hasDndAccess(ctx)
             requiresAccessibilityService -> !PermissionHelper.hasAccessibilityService(ctx)
             requiresNotificationListener -> !PermissionHelper.hasNotificationListener(ctx)
+            requiresAllFilesAccess -> !PermissionHelper.hasAllFilesAccess(ctx)
             else -> false
         }
     }
@@ -883,6 +1210,7 @@ private fun PermissionedSwitch(
                         requiresDndAccess -> PermissionHelper.dndAccessIntent(ctx)
                         requiresAccessibilityService -> PermissionHelper.accessibilitySettingsIntent()
                         requiresNotificationListener -> PermissionHelper.notificationListenerSettingsIntent()
+                        requiresAllFilesAccess -> PermissionHelper.allFilesAccessIntent(ctx)
                         else -> null
                     }
                     if (intent != null) {

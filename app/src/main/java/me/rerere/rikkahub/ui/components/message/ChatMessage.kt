@@ -65,6 +65,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
+import me.rerere.ai.ui.ToolApprovalState
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
@@ -314,10 +315,19 @@ private fun MessagePartsBlock(
             is MessagePartBlock.ThinkingBlock -> {
                 if (block.steps.isNotEmpty()) {
                     val isReasoningOnlyBlock = block.steps.fastAll { it is ThinkingStep.ReasoningStep }
+                    // Force-expand whenever any tool step is awaiting approval. Without
+                    // this, on 3+ pending tool calls only the last 2 rows are visible
+                    // and the first sits hidden behind the "show more" arrow — easy to
+                    // miss when the agent is asking for the user's go-ahead.
+                    val hasPendingApproval = block.steps.any {
+                        it is ThinkingStep.ToolStep &&
+                            it.tool.approvalState is ToolApprovalState.Pending
+                    }
                     ChainOfThought(
                         modifier = Modifier.animateContentSize(),
                         steps = block.steps,
                         collapsedAdaptiveWidth = isReasoningOnlyBlock,
+                        forceExpanded = hasPendingApproval,
                     ) { step ->
                         when (step) {
                             is ThinkingStep.ReasoningStep -> {
@@ -349,7 +359,16 @@ private fun MessagePartsBlock(
             is MessagePartBlock.ContentBlock -> key(block.index) {
                 when (val part = block.part) {
                     is UIMessagePart.Text -> {
-                        SelectionContainer {
+                        // Pass 3: a Text part may carry a `rikkahub.webview` metadata
+                        // block emitted by a JS skill (Phase 20-audit). When present we
+                        // render a tap-to-open card that routes into BrowserActivity
+                        // instead of the standard markdown — "browser as the viewer."
+                        // The card returns true on render so we skip the markdown branch.
+                        // Only consider for non-user messages — user messages don't carry
+                        // this metadata.
+                        val renderedAsWebviewCard =
+                            role != MessageRole.USER && SkillWebviewCardOrNull(part)
+                        if (!renderedAsWebviewCard) SelectionContainer {
                             if (role == MessageRole.USER) {
                                 Surface(
                                     modifier = Modifier.animateContentSize(),

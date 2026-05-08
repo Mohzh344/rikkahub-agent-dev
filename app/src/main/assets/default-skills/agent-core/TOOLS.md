@@ -29,15 +29,78 @@ Every tool the agent can call, grouped by capability surface. Each entry lists: 
 
 - **`set_torch`** — flashlight on/off.
 - **`vibrate`** — pattern or duration. One of `pattern` or `duration_ms`, not both.
-- **`get_brightness`** / **`set_brightness`** — 0..255. Requires WRITE_SETTINGS.
+- **`get_brightness`** / **`set_brightness`** — 1..255 (the tool clamps below 1 because brightness=0 produces no visible change on most Android builds). For "lowest brightness" requests, pass `1`. Requires WRITE_SETTINGS.
 - **`get_volume`** / **`set_volume`** — per stream. Requires DND access.
 
 ## Media (Phase 1)
 
-- **`play_media`** / **`stop_media`** — play audio from file path or URL.
+- **`play_media`** — START a new playback session from position 0. Replaces any
+  existing session (DESTRUCTIVE). Optional `title`/`artist`/`album`/`artwork_uri`
+  populate the system media notification.
+- **`pause_media`** / **`resume_media`** — pause/resume the active session WITHOUT
+  losing position. Use `resume_media` (not `play_media`) to continue playback.
+- **`seek_media(position_ms)`** — jump within the active session. Works whether
+  playing or paused. Preserves play/pause state.
+- **`get_media_status`** — current track / position / duration / play-state.
+  Free / no approval needed.
+- **`stop_media`** — stop and dismiss the notification.
 - **`scan_media`** — tell Android's media scanner about new files so they show up in Gallery / Music.
 - **`download_file`** — fetch URL into Downloads via DownloadManager.
-- **`write_text_file`** — save arbitrary text to public Downloads.
+- **`write_text_file`** — save text to a path. Defaults refuse if file exists.
+- **`whisper_status()`** — check whether whisper.cpp transcription is ready: Termux toggle
+  enabled, Termux app installed, whisper-cli on disk, model (.bin) present. Returns
+  `{termux_enabled_in_assistant, termux_app_installed, whisper_cli_installed, whisper_cli_path,
+  model_present, model_path, ready_to_transcribe, missing_steps[], install_commands}`.
+  Free/no approval. Call this BEFORE `transcribe_audio_file`.
+- **`transcribe_audio_file(path, language?)`** — transcribe speech in an audio file to text
+  using whisper.cpp (via Termux). Accepts OGG/Opus (Telegram voice notes), WAV, MP3, M4A,
+  FLAC. Returns `{success, text, language, audio_duration_sec, transcription_time_sec}`.
+  Requires Termux + whisper-cli + a model file.
+  **NO HALLUCINATION RULE: `play_media` plays audio to the device speaker — it does NOT
+  let the agent hear the content. When the user sends a voice note and asks what was said,
+  ALWAYS call `transcribe_audio_file` to get the actual words. Never call `play_media` on a
+  voice note and then fabricate a transcript — that is a hallucination.**
+
+**Audio transcription flow**
+
+When the user sends an audio file or voice note (or otherwise asks for transcription),
+the FIRST tool you should call is `whisper_status()`. It tells you whether Termux is
+enabled, whisper.cpp is installed, and a model is present. Three outcomes:
+
+1. `ready_to_transcribe: true` → call `transcribe_audio_file(path, language?)` directly.
+2. `termux_enabled_in_assistant: false` → tell the user the Termux toggle needs to be on
+   for this assistant in Settings → Local Tools. You cannot enable it for them.
+3. Anything else missing (whisper not installed, model missing) → tell the user what's
+   missing AND the install commands from `install_commands`. Ask for explicit confirmation
+   BEFORE running them. The whisper.cpp build takes ~5 minutes; the model download is
+   ~75 MB. Don't silently install.
+
+NEVER call `play_media` on an audio file as a substitute for transcription — that plays
+it through the user's speaker but does NOT give YOU the content. Hallucinating what was
+said is a serious failure.
+
+**Troubleshooting media:** if the user says "I can't hear anything" while a session
+is active, DO NOT call `play_media` — that restarts from 0 and loses the user's
+position. Instead: `get_media_status` (is it actually playing?), `get_volume` and
+`get_audio_info` (volume / mute state), `set_volume` if needed. Only fall back to
+`play_media` if the session is genuinely gone.
+
+## File manager (new)
+
+- **`list_files(path, pattern?, recursive?, limit?)`** — directory listing with optional glob.
+- **`find_files(root, query, recursive?, limit?)`** — recursive name-substring search.
+- **`read_file(path, max_bytes?, encoding?)`** — text or binary read; auto-detects.
+- **`write_text_file(path, content, append?, overwrite?)`** — writes text. Default refuses if file exists. Pass `overwrite=true` to truncate or `append=true` to append.
+- **`write_binary_file(path, base64_content, overwrite?)`** — base64 → file.
+- **`copy_file(src, dst, overwrite?)`** / **`move_file(src, dst, overwrite?)`** — duplicate / rename.
+- **`create_directory(path)`** — mkdir -p semantics.
+- **`delete_file(path, recursive?)`** — refuses non-empty dirs without `recursive=true`.
+- **`file_info(path, include_hash?)`** — stat with optional sha256.
+
+System paths (`/system`, `/proc`, `/dev`, `/data/data/<other-apps>`) are blocked
+unconditionally with a `path_blocked` envelope. Path-traversal via `..` is
+canonicalized and blocked too. Prefer these tools over `termux_run_command` for
+file operations — faster, no shell needed, no Termux dependency.
 
 ## Personal data (Phase 2)
 
@@ -110,10 +173,34 @@ Termux:API, Termux:Boot, etc. are real installed packages but have **no launcher
 - **`ssh_upload`** / **`ssh_download`** — SFTP file transfer.
 - **`ssh_forget_host_key`** — recovery for "HostKey has been changed" after the user reinstalled a remote. Only call after the user explicitly confirms the remote is theirs.
 
-## Cron / scheduling
+## Cron / scheduled jobs (Phase 5)
 
-- **`schedule_job`** — create one-shot or recurring job. `interval_seconds` minimum 60. The cron prompt should explicitly say *"telegram_send_message(chat_id=…)"* if the result needs to reach a Telegram chat — the worker has no idea where to deliver otherwise.
-- **`list_jobs`** / **`pause_job`** / **`resume_job`** / **`delete_job`** — manage existing jobs.
+**Two modes, two timing types:**
+
+- `mode='llm'` — at fire time, your `prompt` is sent to a fresh headless conversation; the model decides what tools to call. Use this when reasoning is required ("if battery < 20%, message me", "summarize last hour of notifications").
+- `mode='direct'` — at fire time, the listed `actions[]` execute deterministically without the LLM. Free, fast, predictable. Use this for fixed side effects ("post 'good morning' every 8am").
+
+**Timing:**
+
+- `schedule_type='once'` — fires once at `at_unix_ms`, then auto-disables.
+- `schedule_type='cron'` — 5-field cron expression with aliases. Examples:
+  - `0 9 * * MON-FRI` — weekdays 9am
+  - `*/15 * * * *` — every 15 minutes
+  - `@every 30m` — every 30 minutes
+  - `@daily` — midnight every day
+  - `0 0 1 * *` — first of every month
+
+  Timezone defaults to the device's; pass IANA id via `timezone` to override.
+
+**Bounds (cron only):** `start_at_unix_ms`, `end_at_unix_ms`, `max_runs`.
+
+**Catchup** (default `fire_once`): `skip` / `fire_once` / `fire_all`. Controls what happens for windows missed during reboot.
+
+**Tools:**
+
+- `schedule_job`, `list_jobs`, `delete_job`, `pause_job`, `resume_job`
+- `trigger_job_now(id)` — fire immediately, doesn't disturb the schedule
+- `get_job_history(id, limit?)` — last N runs newest-first, with outcomes
 
 ## Telegram bot (LLM-side)
 

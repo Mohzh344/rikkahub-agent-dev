@@ -151,12 +151,44 @@ class SkillManager(
         }
         for (skillName in skillNames) {
             val targetDir = SkillPaths.resolveSkillDir(getSkillsDir(), skillName) ?: continue
+
+            // Read the bundled SKILL.md once to decide what to do.
+            val bundledSkillMd = runCatching {
+                assetMgr.open("$assetRoot/$skillName/SKILL.md").bufferedReader().use { it.readText() }
+            }.getOrNull()
+            val isCoreSkill = bundledSkillMd?.let { content ->
+                SkillFrontmatterParser.parse(content)["auto_load"]?.equals("true", ignoreCase = true) == true
+            } == true
+
             val sentinel = targetDir.resolve(".seeded")
-            if (sentinel.exists()) continue
+            val coreVersionFile = targetDir.resolve(".core-bundled-hash")
+
+            if (isCoreSkill) {
+                // Core skills (auto_load=true) re-seed whenever the bundled content changes
+                // — typically across an APK upgrade. This keeps SOUL/HEARTBEAT/TOOLS in
+                // sync with the app version while still allowing the user to edit between
+                // upgrades (their edits stick until we ship a new bundled version).
+                val bundledHash = computeBundledSkillHash(assetRoot, skillName)
+                val currentHash = if (coreVersionFile.exists()) coreVersionFile.readText().trim() else ""
+                if (bundledHash == currentHash) continue
+                try {
+                    if (targetDir.exists()) targetDir.deleteRecursively()
+                    copyAssetSkill(assetRoot, skillName, targetDir)
+                    sentinel.writeText(System.currentTimeMillis().toString())
+                    coreVersionFile.writeText(bundledHash)
+                    Log.i(TAG, "seedDefaultSkillsIfNeeded: re-seeded core skill $skillName (hash=$bundledHash)")
+                } catch (e: Exception) {
+                    Log.w(TAG, "seedDefaultSkillsIfNeeded: failed to re-seed core skill $skillName", e)
+                }
+                continue
+            }
+
+            // Non-core (lazy) skills: original behavior — seed once, then leave alone.
             // The user may have manually installed and then deleted the skill. Detect that
             // case by checking whether the directory exists at all — if it does and there is
             // no sentinel, the user owns it; do not overwrite. If the directory does not
             // exist, this is a fresh install and we can seed.
+            if (sentinel.exists()) continue
             if (targetDir.exists() && targetDir.listFiles()?.isNotEmpty() == true) continue
             try {
                 copyAssetSkill(assetRoot, skillName, targetDir)
@@ -168,14 +200,56 @@ class SkillManager(
         }
     }
 
+    /**
+     * Compute a stable hash over every file in the bundled skill (recursively, in sorted
+     * order so the result is deterministic across runs). Used as the "version" of the
+     * bundled core skill so we know when to re-seed the user's local copy.
+     *
+     * Asset-read failures are mixed into the digest as a stable marker rather than
+     * silently skipped so a transient read failure can't change the hash on a later
+     * successful read (which would trigger a spurious re-seed and clobber user edits).
+     */
+    private fun computeBundledSkillHash(assetRoot: String, skillName: String): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val readFailMarker = "<<read-failed>>".toByteArray()
+        fun walk(path: String) {
+            val children = context.assets.list(path).orEmpty().toList().sorted()
+            for (child in children) {
+                val childPath = "$path/$child"
+                if (isAssetDirectory(childPath)) {
+                    walk(childPath)
+                } else {
+                    md.update(child.toByteArray())  // include name so renames bump the hash
+                    val ok = runCatching {
+                        context.assets.open(childPath).use { input ->
+                            val buf = ByteArray(8 * 1024)
+                            while (true) {
+                                val n = input.read(buf); if (n <= 0) break
+                                md.update(buf, 0, n)
+                            }
+                        }
+                    }.isSuccess
+                    if (!ok) {
+                        Log.w(TAG, "computeBundledSkillHash: read failed for $childPath; marker mixed into digest")
+                        md.update(readFailMarker)
+                    }
+                }
+            }
+        }
+        walk("$assetRoot/$skillName")
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
     private fun copyAssetSkill(assetRoot: String, skillName: String, targetDir: File) {
         val assetMgr = context.assets
         targetDir.mkdirs()
         val children = assetMgr.list("$assetRoot/$skillName").orEmpty()
         for (child in children) {
             val source = "$assetRoot/$skillName/$child"
-            val nested = assetMgr.list(source).orEmpty()
-            if (nested.isNotEmpty()) {
+            if (isAssetDirectory(source)) {
+                // Recurse into directories — including the genuinely-empty case where
+                // listing returns []. The recursive call mkdirs the empty target
+                // and exits cleanly without copying anything.
                 copyAssetSkill("$assetRoot/$skillName", child, targetDir.resolve(child))
                 continue
             }
@@ -184,6 +258,19 @@ class SkillManager(
                 outFile.outputStream().use { out -> input.copyTo(out) }
             }
         }
+    }
+
+    /**
+     * Reliably distinguish an asset directory from an asset file. `AssetManager.list`
+     * returns an empty array for both files and empty directories, which the previous
+     * heuristic confused — any bundled skill shipping an empty placeholder subdir would
+     * crash the seed when we later tried to `assetMgr.open` it as a file.
+     *
+     * The trick: try to open it as a file. Files succeed; directories throw. This is
+     * the same approach AOSP's sample code recommends.
+     */
+    private fun isAssetDirectory(path: String): Boolean {
+        return runCatching { context.assets.open(path).close() }.isFailure
     }
 
     fun resolveSkillFile(skillName: String, relativePath: String): File? {
@@ -216,6 +303,8 @@ class SkillManager(
                 description = description,
                 compatibility = frontmatter["compatibility"],
                 allowedTools = frontmatter["allowed-tools"]?.split(" ")?.filter { it.isNotBlank() } ?: emptyList(),
+                autoLoad = frontmatter["auto_load"]?.equals("true", ignoreCase = true) == true,
+                autoLoadPath = frontmatter["auto_load_path"]?.takeIf { it.isNotBlank() },
                 skillDir = skillDir,
             )
         }.getOrElse {
@@ -225,11 +314,22 @@ class SkillManager(
     }
 }
 
+/**
+ * @property autoLoad If true, the skill's body (or [autoLoadPath] file if set) is injected
+ * directly into the system prompt every turn instead of being lazy-loaded via the `use_skill`
+ * tool. Use this for "core persona" skills like agent-core where the model needs the content
+ * unconditionally — see SkillsTools.kt for where the injection happens. Frontmatter:
+ * `auto_load: true`.
+ * @property autoLoadPath Relative path inside the skill directory of the file to auto-load
+ * (e.g. "SOUL.md"). Defaults to SKILL.md if not set. Frontmatter: `auto_load_path: SOUL.md`.
+ */
 data class SkillMetadata(
     val name: String,
     val description: String,
     val compatibility: String? = null,
     val allowedTools: List<String> = emptyList(),
+    val autoLoad: Boolean = false,
+    val autoLoadPath: String? = null,
     val skillDir: File,
 ) {
     val skillFile: File get() = skillDir.resolve("SKILL.md")

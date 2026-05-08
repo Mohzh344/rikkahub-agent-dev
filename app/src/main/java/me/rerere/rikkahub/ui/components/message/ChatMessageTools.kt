@@ -66,13 +66,19 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.BubbleChatQuestion
 import me.rerere.hugeicons.stroke.Cancel01
 import me.rerere.hugeicons.stroke.Clipboard
+import me.rerere.hugeicons.stroke.Clock02
 import me.rerere.hugeicons.stroke.Delete01
 import me.rerere.hugeicons.stroke.Eraser
 import me.rerere.hugeicons.stroke.GlobalSearch
 import me.rerere.hugeicons.stroke.MagicWand01
+import me.rerere.hugeicons.stroke.Message01
+import me.rerere.hugeicons.stroke.Message02
+import me.rerere.hugeicons.stroke.Pin
 import me.rerere.hugeicons.stroke.QuillWrite01
 import me.rerere.hugeicons.stroke.Refresh01
 import me.rerere.hugeicons.stroke.Search01
+import me.rerere.hugeicons.stroke.Settings03
+import me.rerere.hugeicons.stroke.SmartPhone01
 import me.rerere.hugeicons.stroke.Tick01
 import me.rerere.hugeicons.stroke.Time02
 import me.rerere.hugeicons.stroke.Tools
@@ -131,7 +137,16 @@ private fun getToolIcon(toolName: String, action: String?) = when (toolName) {
     ToolNames.CLIPBOARD -> HugeIcons.Clipboard
     ToolNames.TTS -> HugeIcons.VolumeHigh
     ToolNames.ASK_USER -> HugeIcons.BubbleChatQuestion
-    ToolNames.USE_SKILL -> HugeIcons.MagicWand01
+    ToolNames.USE_SKILL, "run_js" -> HugeIcons.MagicWand01
+
+    // Phase 18 — system intent action chips. These tools fire a system intent the user
+    // finalises in the destination app; the chip shows what got staged.
+    "create_calendar_event" -> HugeIcons.Clock02
+    "create_contact", "send_sms_intent" -> HugeIcons.SmartPhone01
+    "send_email_intent" -> HugeIcons.Message02
+    "open_wifi_settings" -> HugeIcons.Settings03
+    "show_location_on_map" -> HugeIcons.Pin
+
     else -> HugeIcons.Tools
 }
 
@@ -205,6 +220,47 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
             if (path != null) "Skill: $skillName / $path" else "Skill: $skillName"
         }
 
+        // Phase 18 — system intent action chips. Title comes from the executed result's
+        // `summary` field (e.g. "Calendar event: Lunch with Bob") so the user sees what
+        // got staged without the JSON envelope. Pre-execution the title falls back to
+        // the args-derived preview so the approval card is also readable.
+        "create_calendar_event", "create_contact", "send_email_intent",
+        "send_sms_intent", "open_wifi_settings", "show_location_on_map" -> {
+            val summaryFromResult = content.getStringContent("summary")
+            summaryFromResult ?: when (tool.toolName) {
+                "create_calendar_event" -> {
+                    val t = arguments.getStringContent("title") ?: ""
+                    if (t.isNotBlank()) "Calendar event: $t" else "Create calendar event"
+                }
+                "create_contact" -> {
+                    val first = arguments.getStringContent("first_name").orEmpty()
+                    val last = arguments.getStringContent("last_name").orEmpty()
+                    val name = listOf(first, last).filter { it.isNotBlank() }.joinToString(" ")
+                    if (name.isNotBlank()) "Contact: $name" else "Create contact"
+                }
+                "send_email_intent" -> {
+                    val to = arguments.getStringContent("to").orEmpty()
+                    if (to.isNotBlank()) "Email to $to" else "Compose email"
+                }
+                "send_sms_intent" -> {
+                    val ph = arguments.getStringContent("phone_number").orEmpty()
+                    if (ph.isNotBlank()) "SMS to $ph" else "Compose SMS"
+                }
+                "open_wifi_settings" -> "WiFi Settings"
+                "show_location_on_map" -> {
+                    val q = arguments.getStringContent("query").orEmpty()
+                    if (q.isNotBlank()) "Map: $q" else "Open map"
+                }
+                else -> stringResource(R.string.chat_message_tool_call_generic, tool.toolName)
+            }
+        }
+
+        // run_js — show "Skill: <name>" so the user knows what JS skill ran.
+        "run_js" -> {
+            val skillName = arguments.getStringContent("skill_name") ?: ""
+            "JS skill: $skillName"
+        }
+
         else -> stringResource(R.string.chat_message_tool_call_generic, tool.toolName)
     }
 
@@ -267,10 +323,84 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.error,
                         )
+                        // Surface mode-specific detail so the user sees WHAT will run.
+                        val jobInput = tool.inputAsJson()
+                        val mode = jobInput.getStringContent("mode")
+                        if (mode == "direct") {
+                            val actions = runCatching {
+                                (jobInput as? JsonObject)?.get("actions")
+                                    ?.jsonArray
+                            }.getOrNull()
+                            if (actions != null) {
+                                Column {
+                                    actions.forEachIndexed { i, el ->
+                                        val obj = el as? JsonObject
+                                        val toolName = obj?.get("tool")?.jsonPrimitive?.contentOrNull ?: "?"
+                                        val args = obj?.get("args")?.toString().orEmpty()
+                                        val truncatedArgs = if (args.length > 120) args.take(120) + "…" else args
+                                        Text(
+                                            text = "  ${i + 1}. $toolName $truncatedArgs",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        } else if (mode == "llm") {
+                            val prompt = jobInput.getStringContent("prompt").orEmpty()
+                            if (prompt.isNotEmpty()) {
+                                val truncatedPrompt = if (prompt.length > 200) prompt.take(200) + "…" else prompt
+                                Text(
+                                    text = truncatedPrompt,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    // MCP control tools: render args via the redacting helper so headers
+                    // like Authorization / X-Api-Key never appear plainly in the approval
+                    // card. Generic args display would leak them (audit finding).
+                    if (tool.toolName.startsWith("mcp_")) {
+                        val mcpRendered = runCatching {
+                            (arguments as? JsonObject)?.let {
+                                me.rerere.rikkahub.data.ai.mcp.control.McpApprovalRenderer
+                                    .render(tool.toolName, it)
+                            }
+                        }.getOrNull()
+                        if (!mcpRendered.isNullOrBlank()) {
+                            Text(
+                                text = mcpRendered,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    // Workflow_* mutators: human-readable approval body ("Create workflow X /
+                    // When: WiFi connects to HomeWiFi / Do: 1. ssh_exec_saved(host=home) / …").
+                    // Action arg values whose key is in the secret-redaction list are masked.
+                    if (me.rerere.rikkahub.workflow.tools.WorkflowApprovalRenderer.isWorkflowTool(tool.toolName)
+                        && tool.toolName !in setOf("workflow_list", "workflow_get")) {
+                        val workflowRendered = runCatching {
+                            me.rerere.rikkahub.workflow.tools.WorkflowApprovalRenderer
+                                .renderPlain(tool.toolName, tool.input.ifBlank { "{}" })
+                        }.getOrNull()
+                        if (!workflowRendered.isNullOrBlank()) {
+                            Text(
+                                text = workflowRendered,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                     // Four-button row: Allow / Always Allow / Allow for this chat / Deny.
                     // Order matches the Telegram inline-keyboard layout so the user sees the
                     // same mental model on both surfaces.
+                    // Tools listed in ToolApprovalDefaults.NO_ALWAYS_ALLOW (e.g. mcp_add /
+                    // mcp_update — adding an MCP server is a privilege-escalation surface)
+                    // drop the Always-Allow button so each call requires fresh confirmation.
+                    val allowAlwaysButton = me.rerere.rikkahub.data.ai.tools.ToolApprovalDefaults
+                        .allowsAlwaysAllow(tool.toolName)
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         FilledTonalIconButton(
                             onClick = {
@@ -291,20 +421,22 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
                                 modifier = Modifier.size(14.dp),
                             )
                         }
-                        FilledTonalIconButton(
-                            onClick = {
-                                if (inFlight) return@FilledTonalIconButton
-                                inFlight = true
-                                onToolApproval(
-                                    tool.toolCallId, true, "",
-                                    me.rerere.rikkahub.service.ChatService.ApprovalScope.Always,
-                                    tool.toolName,
-                                )
-                            },
-                            enabled = !inFlight,
-                            modifier = Modifier.size(28.dp),
-                        ) {
-                            Text("∞", style = MaterialTheme.typography.labelMedium)
+                        if (allowAlwaysButton) {
+                            FilledTonalIconButton(
+                                onClick = {
+                                    if (inFlight) return@FilledTonalIconButton
+                                    inFlight = true
+                                    onToolApproval(
+                                        tool.toolCallId, true, "",
+                                        me.rerere.rikkahub.service.ChatService.ApprovalScope.Always,
+                                        tool.toolName,
+                                    )
+                                },
+                                enabled = !inFlight,
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Text("∞", style = MaterialTheme.typography.labelMedium)
+                            }
                         }
                         FilledTonalIconButton(
                             onClick = {

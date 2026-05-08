@@ -3,20 +3,40 @@
   xmlns:tools="http://schemas.android.com/tools">
 
   <uses-permission android:name="android.permission.INTERNET" />
+  <!-- Required for ConnectivityManager.registerNetworkCallback (NetworkChangeMonitor)
+       which evicts the OkHttp connection pool on default-network changes. Fixes the
+       post-Termux-interactive-session DNS bug where the JVM negative-cached a transient
+       lookup failure during background and held onto it after return. Auto-granted (normal
+       permission) but declaring is required. -->
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.CAMERA" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
   <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+  <!-- Android 17 (API 37) gates all local-network sockets behind this runtime
+       permission. Required by SSH (LAN hosts) and the web server (LAN access);
+       the runtime check is centralized in RikkaHubApp / SshTool / the toggle UI
+       and short-circuits to "always granted" on older API levels where the
+       permission doesn't exist. -->
+  <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
   <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
   <uses-permission android:name="android.permission.VIBRATE" />
   <uses-permission android:name="android.permission.READ_PHONE_STATE" />
   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+  <!-- Phase 12 — required for geofence triggers on Android 10+. The user grants this
+       lazily when they enable the first geofence workflow; without it, geofence
+       registration silently fails and the workflow row's last_run_status surfaces
+       "Unavailable on this device". -->
+  <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+  <!-- Phase 12 — required for bluetooth_device_connected / bluetooth_device_disconnected
+       triggers on Android 12+. -->
+  <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
   <uses-permission android:name="android.permission.WRITE_SETTINGS"
       tools:ignore="ProtectedPermissions" />
   <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
@@ -25,6 +45,16 @@
   <uses-permission android:name="android.permission.READ_CALL_LOG" />
   <uses-permission android:name="android.permission.READ_SMS" />
   <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <!-- Required so list_files / find_files / read_file can enumerate and read
+       files the app didn't create itself. Without this, scoped storage on
+       Android 11+ hides every pre-existing file from File.listFiles(), even
+       though stat() still works (which is why file_info appeared to work
+       while list_files returned only directories + own creations). Granted
+       via Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION when the
+       user toggles the Files tool on. -->
+  <uses-permission
+      android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+      tools:ignore="ScopedStorage" />
   <uses-permission android:name="android.permission.USE_BIOMETRIC" />
   <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
   <uses-permission
@@ -140,10 +170,70 @@
       android:excludeFromRecents="true"
       android:theme="@style/Theme.Rikkahub.ToolHost" />
 
+    <!-- In-app Browser Activity. Hosts the WebView the LLM drives via the browser_*
+         tools. INTERNET is already declared at the top of this manifest; nothing else
+         needed at install time. configChanges keeps the WebView alive across rotation
+         and keyboard show/hide so the AI doesn't lose its session mid-task. -->
+    <activity
+      android:name=".browser.BrowserActivity"
+      android:exported="false"
+      android:configChanges="screenSize|orientation|keyboardHidden"
+      android:hardwareAccelerated="true"
+      android:theme="@style/Theme.Rikkahub" />
+
+    <!-- Phase 13: External Automation Intent API. Exported activity that accepts
+         RUN_TASK / RUN_CHAT intents from Tasker / MacroDroid / Locale / app callers.
+         Translucent + NoTitleBar so trusted-caller fires don't flash a window. The
+         feature is OFF by default — even with the activity registered here, the
+         dispatcher rejects every call until ExternalAutomationConfig.enabled is true. -->
+    <activity
+      android:name=".automation.ExternalAutomationActivity"
+      android:exported="true"
+      android:excludeFromRecents="true"
+      android:noHistory="true"
+      android:theme="@android:style/Theme.Translucent.NoTitleBar">
+      <intent-filter>
+        <action android:name="me.rerere.rikkahub.RUN_TASK" />
+        <action android:name="me.rerere.rikkahub.RUN_CHAT" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity>
+
+    <!-- ADB-shell entry point for the same RUN_TASK flow. App callers should target the
+         activity above instead — Android 14+ blocks manifest receivers from launching
+         activities in the background. Default-deny: rejects with `untrusted_caller`
+         until the user explicitly opts in via Settings. -->
+    <receiver
+      android:name=".automation.ExternalAutomationReceiver"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="me.rerere.rikkahub.RUN_TASK" />
+      </intent-filter>
+    </receiver>
+
     <service
       android:name=".service.TelegramBotService"
       android:exported="false"
-      android:foregroundServiceType="dataSync" />
+      android:foregroundServiceType="specialUse">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="long-running Telegram bot long-poll loop" />
+    </service>
+
+    <service
+      android:name=".service.MediaPlaybackService"
+      android:exported="false"
+      android:foregroundServiceType="mediaPlayback" />
+
+    <!-- Handles hardware media-button broadcasts (headset, Bluetooth) and routes them
+         to the active MediaSession via the AndroidX media-compat helper. -->
+    <receiver
+      android:name="androidx.media.session.MediaButtonReceiver"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MEDIA_BUTTON" />
+      </intent-filter>
+    </receiver>
 
     <service
       android:name=".service.RikkaAccessibilityService"
@@ -177,6 +267,18 @@
         <action android:name="android.intent.action.BOOT_COMPLETED" />
         <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
         <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+      </intent-filter>
+    </receiver>
+
+    <!-- Phase 12 — geofence transition receiver. Play Services delivers via
+         PendingIntent.getBroadcast outside any active component, so this MUST be a
+         manifest receiver. Not exported — the only sender is Play Services running in
+         our process. -->
+    <receiver
+      android:name=".workflow.trigger.GeofenceTriggerReceiver"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="me.rerere.rikkahub.workflow.GEOFENCE_TRANSITION" />
       </intent-filter>
     </receiver>
 

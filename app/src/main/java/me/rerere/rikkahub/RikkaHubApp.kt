@@ -29,6 +29,7 @@ import me.rerere.rikkahub.di.repositoryModule
 import me.rerere.rikkahub.di.viewModelModule
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.datastore.SettingsStore
+import me.rerere.rikkahub.data.ai.tools.HeadlessConversations
 import me.rerere.rikkahub.service.WebServerService
 import me.rerere.rikkahub.utils.CrashHandler
 import me.rerere.rikkahub.utils.DatabaseUtil
@@ -54,6 +55,13 @@ class RikkaHubApp : Application() {
             modules(appModule, viewModelModule, dataSourceModule, repositoryModule)
         }
         this.createNotificationChannel()
+
+        // Restore any headless conversation IDs that survived a process kill; must run
+        // before any cron worker fires so mark/unmark are consistent.
+        HeadlessConversations.init(this)
+
+        // Sweep orphan headless conversations created by workers that were killed mid-execute.
+        sweepOrphanHeadlessConversations()
 
         // set cursor window size to 32MB
         DatabaseUtil.setCursorWindowSize(32 * 1024 * 1024)
@@ -91,6 +99,12 @@ class RikkaHubApp : Application() {
         // auto-revive it after a process kill; we need to bring it back ourselves.
         startTelegramBotIfEnabled()
 
+        // Initialise the agent's `~` workspace at /data/data/<pkg>/files/workspace/.
+        // Tools resolve `~` and `~/foo` paths to this dir, giving the LLM a stable
+        // sandbox for `.learnings/`, scratch files, and skill state without scoped-
+        // storage friction. Termux-style: private, persistent, OS-blessed.
+        me.rerere.rikkahub.data.ai.tools.local.AgentWorkspace.init(this)
+
         // Copy any default skills bundled in assets/default-skills/* into the user's skills
         // dir on first launch. SkillManager guards via a per-skill .seeded sentinel so this
         // is a one-time install — user edits / deletes are respected on subsequent launches.
@@ -99,7 +113,78 @@ class RikkaHubApp : Application() {
         // Increment launch count
         incrementLaunchCount()
 
+        // Phase 12: kick off the workflow trigger registry. It subscribes to the workflows
+        // table and reconciles broadcast receivers / geofences / time_cron schedules with
+        // every change. With zero enabled workflows, no receivers are registered.
+        startWorkflowRegistry()
+
+        // Phase-17 stability — register a network-change monitor that evicts OkHttp's
+        // connection pool on every default-network transition. Fixes the post-Termux-
+        // interactive-session "Unable to resolve host …" bug: when the user opens
+        // Termux's terminal for `htop` the app backgrounds, Android may flip the
+        // network into a restricted state, and the JVM's negative DNS cache plus
+        // OkHttp's idle sockets keep the failure sticky after return. Eviction on the
+        // next onAvailable forces a fresh DNS lookup + new socket on the next request.
+        startNetworkChangeMonitor()
+
         // Composer.setDiagnosticStackTraceMode(ComposeStackTraceMode.Auto)
+    }
+
+    private fun startWorkflowRegistry() {
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                val registry = get<me.rerere.rikkahub.workflow.trigger.TriggerRegistry>()
+                val engine = get<me.rerere.rikkahub.workflow.execution.WorkflowEngine>()
+                registry.setEngineCallback(engine.triggerCallback)
+                registry.start()
+            }.onFailure {
+                Log.e(TAG, "startWorkflowRegistry failed", it)
+            }
+        }
+    }
+
+    private fun startNetworkChangeMonitor() {
+        runCatching {
+            val client = get<okhttp3.OkHttpClient>()
+            me.rerere.rikkahub.utils.NetworkChangeMonitor.start(this, client)
+        }.onFailure {
+            Log.w(TAG, "startNetworkChangeMonitor failed", it)
+        }
+    }
+
+    /**
+     * Cleans up orphan conversations left by cron workers that were killed mid-execute.
+     *
+     * When a worker is killed between HeadlessConversations.mark() and unmark(), the
+     * conversation ID remains in SharedPreferences. On the next app start we detect these
+     * IDs and delete the corresponding "[Scheduled]" conversations from the DB so they
+     * don't pollute the chat list.
+     *
+     * We clear the persisted set at the end regardless — if a conversation doesn't exist in
+     * DB there's nothing to clean up, and stale IDs only confuse future sweeps.
+     */
+    private fun sweepOrphanHeadlessConversations() {
+        get<AppScope>().launch(Dispatchers.IO) {
+            runCatching {
+                val orphanIds = HeadlessConversations.activeIds()
+                if (orphanIds.isEmpty()) return@runCatching
+                Log.i(TAG, "sweepOrphanHeadlessConversations: found ${orphanIds.size} candidate(s)")
+                val convRepo = get<me.rerere.rikkahub.data.repository.ConversationRepository>()
+                for (id in orphanIds) {
+                    runCatching {
+                        val conv = convRepo.getConversationById(id)
+                        if (conv != null && conv.title.startsWith("[Scheduled]")) {
+                            Log.i(TAG, "sweepOrphanHeadlessConversations: deleting orphan conv $id")
+                            convRepo.deleteConversation(conv)
+                        }
+                    }.onFailure { Log.w(TAG, "sweepOrphanHeadlessConversations: error for $id", it) }
+                }
+                HeadlessConversations.clearAll()
+                Log.i(TAG, "sweepOrphanHeadlessConversations: sweep complete")
+            }.onFailure {
+                Log.e(TAG, "sweepOrphanHeadlessConversations failed", it)
+            }
+        }
     }
 
     private fun incrementLaunchCount() {
@@ -133,6 +218,12 @@ class RikkaHubApp : Application() {
                 if (cfg.isUsable) {
                     Log.i(TAG, "startTelegramBotIfEnabled: re-starting bot service")
                     me.rerere.rikkahub.service.TelegramBotService.start(this@RikkaHubApp)
+                    // Defense-in-depth against OEM aggressive task-killing: a 30-min
+                    // periodic health probe re-starts the service if anything killed it
+                    // outside our control. Idempotent — uses ExistingPeriodicWorkPolicy.KEEP.
+                    me.rerere.rikkahub.service.TelegramBotHealthWorker.schedule(this@RikkaHubApp)
+                } else {
+                    me.rerere.rikkahub.service.TelegramBotHealthWorker.cancel(this@RikkaHubApp)
                 }
             }.onFailure {
                 Log.e(TAG, "startTelegramBotIfEnabled failed", it)
@@ -182,6 +273,19 @@ class RikkaHubApp : Application() {
                         ) != PackageManager.PERMISSION_GRANTED
                     ) {
                         Log.w(TAG, "startWebServerIfEnabled: notification permission not granted, skipping")
+                        return@launch
+                    }
+                    // Android 17 (API 37) requires ACCESS_LOCAL_NETWORK to bind to LAN
+                    // interfaces. localhost-only mode does not need it because traffic stays
+                    // within the app's UID. Cherry-picked from upstream 80186f5d.
+                    if (Build.VERSION.SDK_INT >= 37 &&
+                        !settings.webServerLocalhostOnly &&
+                        ContextCompat.checkSelfPermission(
+                            this@RikkaHubApp,
+                            android.Manifest.permission.ACCESS_LOCAL_NETWORK
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        Log.w(TAG, "startWebServerIfEnabled: local network permission not granted, skipping")
                         return@launch
                     }
                     val intent = Intent(this@RikkaHubApp, WebServerService::class.java).apply {

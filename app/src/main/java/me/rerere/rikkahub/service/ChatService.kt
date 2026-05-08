@@ -349,16 +349,25 @@ class ChatService(
                 val currentConversation = session.state.value
 
                 // 添加消息到列表
-                val newConversation = currentConversation.copy(
+                val withUser = currentConversation.copy(
                     messageNodes = currentConversation.messageNodes + UIMessage(
                         role = MessageRole.USER,
                         parts = processedContent,
                     ).toMessageNode(),
                 )
-                saveConversation(conversationId, newConversation)
+                saveConversation(conversationId, withUser)
 
-                // 开始补全
-                if (answer) {
+                // Phase 16 — fast-path router. If the assistant has it enabled and the user's
+                // message matches a deterministic intent, run the matching tool and inject the
+                // result as a synthetic assistant message — skipping the LLM entirely.
+                // Conservative: any match failure (tool throws, no result) falls back to the
+                // normal LLM path. Headless conversations and non-text messages are skipped.
+                val routedHandled = if (answer)
+                    tryFastPathRoute(conversationId, processedContent, withUser)
+                else false
+
+                // 开始补全 — only if router didn't handle the turn
+                if (answer && !routedHandled) {
                     handleMessageComplete(conversationId)
                 }
 
@@ -369,6 +378,103 @@ class ChatService(
             }
         }
         session.setJob(job)
+    }
+
+    /**
+     * Phase 16 — fast-path router entry. Returns `true` if the router successfully handled
+     * the turn (synthesised an assistant message and stored it) so the caller knows to skip
+     * the normal LLM dispatch. Returns `false` to fall through.
+     */
+    private suspend fun tryFastPathRoute(
+        conversationId: Uuid,
+        userParts: List<UIMessagePart>,
+        afterUserSave: me.rerere.rikkahub.data.model.Conversation,
+    ): Boolean {
+        // Headless paths (cron / sub-agent / external-automation / workflow) must always go
+        // through the LLM — the fast-path is a per-user-turn optimisation, not a system-flow.
+        if (me.rerere.rikkahub.data.ai.tools.HeadlessConversations.isHeadless(conversationId)) return false
+
+        val assistant = settingsStore.settingsFlow.value.getCurrentAssistant()
+        if (!assistant.fastPathRouterEnabled) return false
+
+        val userText = userParts.filterIsInstance<UIMessagePart.Text>().joinToString(" ") { it.text }.trim()
+        if (userText.isBlank()) return false
+
+        val match = me.rerere.rikkahub.skills.FastPathRouter.route(userText) ?: return false
+
+        // Tool list construction is non-trivial on assistants with many enabled categories
+        // (allocates a fresh List<Tool> each call). Defer until AFTER a router match so the
+        // common no-match path stays at a single regex scan + an early return.
+        // Fast-path is gated on !isHeadless above; pass the caller context so any tools the
+        // router fires inherit the right assistant id (workflows / sub-agents / etc).
+        val tools = localTools.getTools(
+            assistant.localTools,
+            me.rerere.rikkahub.data.ai.tools.ToolInvocationContext(
+                callerAssistantId = assistant.id.toString(),
+                callerConversationId = conversationId.toString(),
+                isHeadless = false,  // gated above
+            ),
+        )
+        val tool = tools.firstOrNull { it.name == match.toolName } ?: run {
+            android.util.Log.d("FastPathRouter", "matched intent=${match.intent} but tool=${match.toolName} not registered for assistant; falling through")
+            return false
+        }
+
+        // Defence-in-depth — even though v1's intent set is read-only, run HARDLINE here so
+        // that adding a side-effecting intent later (e.g. "set brightness 50%") can't bypass
+        // the floor by routing around the LLM-tool-call path that normally enforces it.
+        val hardlineReason = me.rerere.rikkahub.data.ai.tools.HardlineCommandGuard
+            .checkTool(match.toolName, match.args.toString())
+        if (hardlineReason != null) {
+            android.util.Log.w("FastPathRouter", "hardline-blocked intent=${match.intent} tool=${match.toolName}: $hardlineReason; falling through to LLM")
+            return false
+        }
+
+        val rendered: String = try {
+            val out = tool.execute(match.args)
+            val rawText = out.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }
+            val parsed = runCatching {
+                kotlinx.serialization.json.Json.parseToJsonElement(rawText).jsonObject
+            }.getOrNull()
+            val formatted = if (match.format != null && parsed != null) {
+                runCatching { match.format.invoke(parsed) }.getOrNull()
+            } else null
+            // Fall back to raw text if formatter throws or produces nothing.
+            formatted?.takeIf { it.isNotBlank() } ?: rawText
+        } catch (t: Throwable) {
+            android.util.Log.w("FastPathRouter", "tool ${match.toolName} threw, falling back to LLM", t)
+            me.rerere.rikkahub.skills.FastPathRouterLog.record(
+                me.rerere.rikkahub.skills.FastPathRouterLog.Entry(
+                    whenMs = System.currentTimeMillis(),
+                    intent = match.intent,
+                    toolName = match.toolName,
+                    userText = userText.take(120),
+                    resultPreview = "tool threw: ${t.message?.take(80)}",
+                    skippedLlm = false,
+                )
+            )
+            return false
+        }
+
+        // Inject synthetic assistant message into the conversation.
+        val withAssistant = afterUserSave.copy(
+            messageNodes = afterUserSave.messageNodes + UIMessage(
+                role = MessageRole.ASSISTANT,
+                parts = listOf(UIMessagePart.Text(rendered)),
+            ).toMessageNode(),
+        )
+        saveConversation(conversationId, withAssistant)
+        me.rerere.rikkahub.skills.FastPathRouterLog.record(
+            me.rerere.rikkahub.skills.FastPathRouterLog.Entry(
+                whenMs = System.currentTimeMillis(),
+                intent = match.intent,
+                toolName = match.toolName,
+                userText = userText.take(120),
+                resultPreview = rendered.take(200),
+                skippedLlm = true,
+            )
+        )
+        return true
     }
 
     private fun preprocessUserInputParts(parts: List<UIMessagePart>): List<UIMessagePart> {
@@ -451,6 +557,16 @@ class ChatService(
         val session = getOrCreateSession(conversationId)
         val convMutex = mutexFor(conversationId)
 
+        // Snapshot the prior generation job BEFORE the appScope.launch below replaces it
+        // via setJob. session.setJob runs synchronously after launch returns; the launched
+        // body is dispatched and runs LATER (Dispatchers.Main posts to the looper). So
+        // calling session.getJob() inside the body would return THIS very job — and
+        // cancelAndJoin would self-cancel the resume coroutine: saveConversation's first
+        // suspend then throws CancellationException, the tool stays Pending, and the
+        // generation never resumes. The YOLO toggle masked this because auto-approval
+        // skips the Pending → handleToolApproval path entirely.
+        val priorGenerationJob = session.getJob()
+
         // Commit the broader-scope grant on a NonCancellable scope BEFORE the cancellable
         // mutation block. Previous design ran grantAlways() inside the cancellable
         // appScope.launch — a rapid second tap would cancel the first job and silently
@@ -481,8 +597,9 @@ class ChatService(
                     // Wait for any prior generation job to actually finish writing before
                     // we read state. cancelAndJoin (vs bare cancel) closes the race where
                     // the prior coroutine emits one last chunk into `messages` between
-                    // our cancel call and our state.value read.
-                    session.getJob()?.let { runCatching { it.cancelAndJoin() } }
+                    // our cancel call and our state.value read. Use the SNAPSHOT taken
+                    // before launch — see the comment on priorGenerationJob above.
+                    priorGenerationJob?.let { runCatching { it.cancelAndJoin() } }
 
                     val conversation = session.state.value
                     val newApprovalState = when {
@@ -649,7 +766,18 @@ class ChatService(
                     if (settings.enableWebSearch) {
                         addAll(createSearchTools(settings))
                     }
-                    addAll(localTools.getTools(settings.getCurrentAssistant().localTools))
+                    // Pass the caller context so context-aware tools (subagent_dispatch
+                    // recursion guard, workflow_create authoring-id) can read the
+                    // calling conversation + assistant. isHeadless is read from
+                    // HeadlessConversations — true iff this is a cron / sub-agent /
+                    // workflow / external-automation flow.
+                    val invocationCtx = me.rerere.rikkahub.data.ai.tools.ToolInvocationContext(
+                        callerAssistantId = settings.getCurrentAssistant().id.toString(),
+                        callerConversationId = conversationId.toString(),
+                        isHeadless = me.rerere.rikkahub.data.ai.tools.HeadlessConversations
+                            .isHeadless(conversationId),
+                    )
+                    addAll(localTools.getTools(settings.getCurrentAssistant().localTools, invocationCtx))
                     val assistant = settings.getCurrentAssistant()
                     if (assistant.enabledSkills.isNotEmpty()) {
                         addAll(

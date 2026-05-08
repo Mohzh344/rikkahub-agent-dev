@@ -21,8 +21,8 @@ android {
         applicationId = "me.rerere.rikkahub"
         minSdk = 26
         targetSdk = 37
-        versionCode = 155
-        versionName = "2.1.12"
+        versionCode = 159
+        versionName = "2.1.16"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -288,6 +288,9 @@ dependencies {
     // AndroidX Biometric (BiometricPrompt)
     implementation("androidx.biometric:biometric:1.2.0-alpha05")
 
+    // AndroidX Media — MediaSessionCompat, MediaButtonReceiver, NotificationCompat.MediaStyle
+    implementation("androidx.media:media:1.7.0")
+
     // modules
     implementation(project(":ai"))
     implementation(project(":web"))
@@ -301,6 +304,9 @@ dependencies {
 
     // SSH client (Mwiede fork — maintained, Android-friendly)
     implementation("com.github.mwiede:jsch:0.2.21")
+
+    // Cron utilities (expression parsing & validation)
+    implementation("com.cronutils:cron-utils:9.2.1")
 
     // Leak Canary
     // debugImplementation(libs.leakcanary.android)
