@@ -186,7 +186,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
         null
     }
     
-    // --- Planning Mode Integration ---
+    // --- Terminal Integration ---
     val isTerminal = isTerminalTool(tool.toolName)
     val terminalSession = if (isTerminal) {
         TerminalSession(
@@ -293,12 +293,13 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
         else -> false
     } || isDenied || images.isNotEmpty()
 
-    
+
+    // Display Terminal if it's a terminal tool
+    if (isTerminal && terminalSession != null) {
         TerminalView(session = terminalSession, modifier = Modifier.padding(bottom = 8.dp), initiallyExpanded = true)
     }
 
-    ControlledChainOfThoughtStep(
-        expanded = expanded,
+    ControlledChainOfThoughtStep(        expanded = expanded,
         onExpandedChange = { expanded = it },
         icon = {
             if (loading) {
@@ -949,8 +950,13 @@ private fun ChainOfThoughtScope.AskUserToolStep(
 
     var expanded by remember { mutableStateOf(true) }
 
-    ControlledChainOfThoughtStep(
-        expanded = expanded,
+
+    // Display Terminal if it's a terminal tool
+    if (isTerminal && terminalSession != null) {
+        TerminalView(session = terminalSession, modifier = Modifier.padding(bottom = 8.dp), initiallyExpanded = true)
+    }
+
+    ControlledChainOfThoughtStep(        expanded = expanded,
         onExpandedChange = { expanded = it },
         icon = {
             if (loading) {
