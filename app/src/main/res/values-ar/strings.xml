@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Planning Mode -->
+    <string name="planner_title">المخطط</string>
+    <string name="terminal_running">قيد التشغيل</string>
+    <string name="terminal_waiting">بانتظار المخرجات...</string>
+    <string name="terminal_exit_success">الخروج: 0 (نجاح)</string>
+    <string name="terminal_exit_error">الخروج: %1$d (خطأ)</string>
+</resources>

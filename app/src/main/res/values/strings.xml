@@ -1422,5 +1422,11 @@
   <string name="browser_ai_stripe_active">AI: %1$s</string>
   <string name="browser_ai_stripe_expand">Show recent</string>
   <string name="browser_ai_stripe_collapse">Hide</string>
+  <!-- Planning Mode -->
+  <string name="planner_title">Planner</string>
+  <string name="terminal_running">is running</string>
+  <string name="terminal_waiting">Waiting for output...</string>
+  <string name="terminal_exit_success">Exit: 0 (success)</string>
+  <string name="terminal_exit_error">Exit: %1$d (error)</string>
 </resources>
 

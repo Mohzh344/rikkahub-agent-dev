@@ -166,6 +166,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
         AskUserToolStep(tool = tool, loading = loading, onToolAnswer = onToolAnswer)
         return
     }
+    
     var showResult by remember { mutableStateOf(false) }
     var showDenyDialog by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf(true) }
@@ -174,18 +175,33 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     val isPending = tool.approvalState is ToolApprovalState.Pending
     val isDenied = tool.approvalState is ToolApprovalState.Denied
     val arguments = tool.inputAsJson()
-    val memoryAction = arguments.getStringContent("action")
+    
     val content = if (tool.isExecuted) {
         runCatching {
-            JsonInstant.parseToJsonElement(
+            json.parseToJsonElement(
                 tool.output.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }
-            )
+            ).jsonObjectOrNull ?: JsonObject(emptyMap())
         }.getOrElse { JsonObject(emptyMap()) }
     } else {
         null
     }
-    val images = tool.output.filterIsInstance<UIMessagePart.Image>()
+    
+    // --- Planning Mode Integration ---
+    val isTerminal = isTerminalTool(tool.toolName)
+    val terminalSession = if (isTerminal) {
+        TerminalSession(
+            type = TerminalType.fromToolName(tool.toolName),
+            command = arguments.getStringContent("command") ?: arguments.getStringContent("executable") ?: "",
+            stdout = content?.getStringContent("stdout") ?: "",
+            stderr = content?.getStringContent("stderr") ?: "",
+            exitCode = content?.getStringContent("exit_code")?.toIntOrNull(),
+            isRunning = loading,
+            hostLabel = arguments.getStringContent("name")
+        )
+    } else null
 
+    val images = tool.output.filterIsInstance<UIMessagePart.Image>()
+    val memoryAction = arguments.getStringContent("action")
     val title = when (tool.toolName) {
         ToolNames.MEMORY -> when (memoryAction) {
             MemoryActions.CREATE -> stringResource(R.string.chat_message_tool_create_memory)
@@ -276,6 +292,17 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
         ToolNames.TTS -> arguments.getStringContent("text") != null
         else -> false
     } || isDenied || images.isNotEmpty()
+
+    
+    // Display Planner if available
+    if (planSteps.isNotEmpty()) {
+        PlannerCard(steps = planSteps, modifier = Modifier.padding(bottom = 8.dp))
+    }
+
+    // Display Terminal if it's a terminal tool
+    if (isTerminal && terminalSession != null) {
+        TerminalView(session = terminalSession, modifier = Modifier.padding(bottom = 8.dp), initiallyExpanded = true)
+    }
 
     ControlledChainOfThoughtStep(
         expanded = expanded,
