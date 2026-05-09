@@ -304,7 +304,8 @@ private fun ColumnScope.ProviderConfigureOpenAI(
             Text(stringResource(id = R.string.setting_provider_page_api_key))
         },
         modifier = Modifier.fillMaxWidth(),
-        maxLines = 3,
+        maxLines = 5,
+        supportingText = { Text(stringResource(id = R.string.setting_provider_page_api_key_hint)) },
     )
 
     OutlinedTextField(
@@ -382,7 +383,8 @@ private fun ColumnScope.ProviderConfigureClaude(
             Text(stringResource(id = R.string.setting_provider_page_name))
         },
         modifier = Modifier.fillMaxWidth(),
-        maxLines = 3,
+        maxLines = 5,
+        supportingText = { Text(stringResource(id = R.string.setting_provider_page_api_key_hint)) },
     )
 
     OutlinedTextField(
@@ -394,7 +396,8 @@ private fun ColumnScope.ProviderConfigureClaude(
             Text(stringResource(id = R.string.setting_provider_page_api_key))
         },
         modifier = Modifier.fillMaxWidth(),
-        maxLines = 3,
+        maxLines = 5,
+        supportingText = { Text(stringResource(id = R.string.setting_provider_page_api_key_hint)) },
     )
 
     OutlinedTextField(
@@ -505,7 +508,8 @@ private fun ColumnScope.ProviderConfigureGoogle(
                 Text(stringResource(id = R.string.setting_provider_page_api_key))
             },
             modifier = Modifier.fillMaxWidth(),
-            maxLines = 3,
+            maxLines = 5,
+        supportingText = { Text(stringResource(id = R.string.setting_provider_page_api_key_hint)) },
         )
     }
 
@@ -621,7 +625,8 @@ private fun ColumnScope.ProviderConfigureAICore(
         onValueChange = { onEdit(provider.copy(name = it.trim())) },
         label = { Text(stringResource(id = R.string.setting_provider_page_name)) },
         modifier = Modifier.fillMaxWidth(),
-        maxLines = 3,
+        maxLines = 5,
+        supportingText = { Text(stringResource(id = R.string.setting_provider_page_api_key_hint)) },
     )
 
     // Release-stage radio. PREVIEW pulls a higher-quality but more flappy build of Gemini

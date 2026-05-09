@@ -494,6 +494,7 @@
   <string name="language_korean">🇰🇷 한국어</string>
   <string name="language_simplified_chinese">🇨🇳 简体中文</string>
   <string name="language_spanish">🇪🇸 Español</string>
+  <string name="language_arabic">🇸🇦 العربية</string>
   <string name="language_traditional_chinese">🇨🇳 繁體中文</string>
   <string name="mcp_picker_syncing">Syncing MCP servers...</string>
   <string name="mcp_picker_title">MCP Servers</string>
@@ -868,6 +869,7 @@
   <string name="setting_provider_page_advanced_settings">Advanced Settings</string>
   <string name="setting_provider_page_api_base_url">API Base Url</string>
   <string name="setting_provider_page_api_key">API Key</string>
+  <string name="setting_provider_page_api_key_hint">Supports multiple keys separated by commas for auto-rotation</string>
   <string name="setting_provider_page_api_path">API Path</string>
   <string name="setting_provider_page_avaliable_models">Avaliable Models</string>
   <string name="setting_provider_page_balance_api_path">Balance API Path</string>
