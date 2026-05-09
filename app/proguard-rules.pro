@@ -46,3 +46,11 @@
 -keep class com.fasterxml.jackson.** { *; }
 -keep class com.auth0.jwt.** { *; }
 -keep class com.jcraft.jsch.** { *; }
+
+-dontwarn com.sun.jna.**
+-dontwarn org.apache.logging.**
+-dontwarn org.ietf.jgss.**
+-dontwarn org.newsclub.net.unix.**
+-dontwarn com.jcraft.jsch.PageantConnector
+-dontwarn com.jcraft.jsch.jgss.**
+-dontwarn com.jcraft.jsch.JUnixSocketFactory
