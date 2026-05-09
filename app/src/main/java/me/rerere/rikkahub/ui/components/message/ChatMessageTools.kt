@@ -178,7 +178,7 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     
     val content = if (tool.isExecuted) {
         runCatching {
-            json.parseToJsonElement(
+            JsonInstant.parseToJsonElement(
                 tool.output.filterIsInstance<UIMessagePart.Text>().joinToString("\n") { it.text }
             ).jsonObjectOrNull ?: JsonObject(emptyMap())
         }.getOrElse { JsonObject(emptyMap()) }
@@ -294,13 +294,6 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     } || isDenied || images.isNotEmpty()
 
     
-    // Display Planner if available
-    if (planSteps.isNotEmpty()) {
-        PlannerCard(steps = planSteps, modifier = Modifier.padding(bottom = 8.dp))
-    }
-
-    // Display Terminal if it's a terminal tool
-    if (isTerminal && terminalSession != null) {
         TerminalView(session = terminalSession, modifier = Modifier.padding(bottom = 8.dp), initiallyExpanded = true)
     }
 
