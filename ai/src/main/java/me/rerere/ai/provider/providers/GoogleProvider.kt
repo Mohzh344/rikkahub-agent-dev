@@ -435,7 +435,7 @@ class GoogleProvider(private val client: OkHttpClient, context: Context? = null)
                                                 "additionalProperties",
                                                 "enum",
                                             )
-                                        )
+                                        ).let { fixGeminiArrayItems(it) }
                                 )
                             })
                         }
