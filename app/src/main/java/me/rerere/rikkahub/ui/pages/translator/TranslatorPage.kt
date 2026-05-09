@@ -214,7 +214,7 @@ private val Locales by lazy {
         Locale.FRENCH,
         Locale.GERMAN,
         Locale.ITALIAN,
-        Locale("es", "ES")
+        Locale("es", "ES"),
         Locale("ar", "SA"),
     )
 }
@@ -239,7 +239,6 @@ private fun LanguageSelector(
             Locale.ITALIAN -> stringResource(R.string.language_italian)
             Locale("es", "ES") -> stringResource(R.string.language_spanish)
             Locale("ar", "SA") -> stringResource(R.string.language_arabic)
-        Locale("ar", "SA"),
             else -> locale.getDisplayLanguage(Locale.getDefault())
         }
     }
