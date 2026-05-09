@@ -294,7 +294,9 @@ fun ChainOfThoughtScope.ChatMessageToolStep(
     } || isDenied || images.isNotEmpty()
 
 
-    // Display Terminal if it's a terminal tool
+
+
+        // Display Terminal if it's a terminal tool
     if (isTerminal && terminalSession != null) {
         TerminalView(session = terminalSession, modifier = Modifier.padding(bottom = 8.dp), initiallyExpanded = true)
     }
@@ -951,10 +953,7 @@ private fun ChainOfThoughtScope.AskUserToolStep(
     var expanded by remember { mutableStateOf(true) }
 
 
-    // Display Terminal if it's a terminal tool
-    if (isTerminal && terminalSession != null) {
-        TerminalView(session = terminalSession, modifier = Modifier.padding(bottom = 8.dp), initiallyExpanded = true)
-    }
+
 
     ControlledChainOfThoughtStep(        expanded = expanded,
         onExpandedChange = { expanded = it },
